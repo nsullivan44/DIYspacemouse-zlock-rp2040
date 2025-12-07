@@ -1,0 +1,171 @@
+#include <Wire.h>
+#include "TLx493D_inc.hpp"
+#include <TinyUSB_Mouse_and_Keyboard.h>
+#include <OneButton.h>
+#include <SimpleKalmanFilter.h>
+
+using namespace ifx::tlx493d;
+
+// I2C: TLV493D-A1B6 at address 0x5E (A0 variant) on Wire1
+TLx493D_A1B6 mag(Wire1, TLx493D_IIC_ADDR_A0_e);
+
+// Kalman filters
+SimpleKalmanFilter xFilter(1, 1, 0.2);
+SimpleKalmanFilter yFilter(1, 1, 0.2);
+SimpleKalmanFilter zFilter(1, 1, 0.2);
+
+// Buttons
+OneButton button1(27, true);
+OneButton button2(24, true);
+
+float xOffset = 0, yOffset = 0, zOffset = 0;
+float xCurrent = 0, yCurrent = 0, zCurrent = 0;
+
+int calSamples   = 300;
+int magRange     = 3;
+int outRange     = 127;       // max allowed in HID report
+float xyThreshold = 0.25f;     // center dead-zone threshold
+float zThreshold  = xyThreshold * 1.2f;
+
+bool isOrbit = false;
+
+// forward declarations
+void goHome();
+void fitToScreen();
+
+void setup()
+{
+  // Buttons
+  button1.attachClick(goHome);
+  button1.attachLongPressStop(goHome);
+
+  button2.attachClick(fitToScreen);
+  button2.attachLongPressStop(fitToScreen);
+
+  // Mouse / keyboard
+  Mouse.begin();
+  Keyboard.begin();
+
+  Serial.begin(115200);
+  delay(2000);
+
+  // I2C + sensor
+  Wire1.begin();      // use Wire.begin() instead if that’s where you saw 0x5E
+  mag.begin();
+
+  Serial.println("Calibrating offsets... keep the knob centered.");
+
+  // crude offset calibration
+  for (int i = 0; i < calSamples; i++) {
+    double x, y, z, t;
+    bool ok = mag.getMagneticFieldAndTemperature(&x, &y, &z, &t);
+    if (ok) {
+      xOffset += (float)x;
+      yOffset += (float)y;
+      zOffset += (float)z;
+    }
+    delay(5);
+    if ((i % 25) == 0) Serial.print(".");
+  }
+
+  xOffset /= calSamples;
+  yOffset /= calSamples;
+  zOffset /= calSamples;
+
+  Serial.println();
+  Serial.println("Offsets (mT):");
+  Serial.println(xOffset);
+  Serial.println(yOffset);
+  Serial.println(zOffset);
+}
+
+void loop()
+{
+  // buttons
+  button1.tick();
+  button2.tick();
+
+  // read sensor
+  double x_mT, y_mT, z_mT, t;
+  bool ok = mag.getMagneticFieldAndTemperature(&x_mT, &y_mT, &z_mT, &t);
+
+  if (!ok) {
+    // on read error, don't move anything
+    Serial.println("Mag read error");
+    Mouse.release(MOUSE_MIDDLE);
+    Keyboard.releaseAll();
+    isOrbit = false;
+    delay(5);
+    return;
+  }
+
+  // remove offsets
+  float rawX = (float)x_mT - xOffset;
+  float rawY = (float)y_mT - yOffset;
+  float rawZ = (float)z_mT - zOffset;
+
+  // filter
+  xCurrent = xFilter.updateEstimate(rawX);
+  yCurrent = yFilter.updateEstimate(rawY);
+  zCurrent = zFilter.updateEstimate(rawZ);
+
+  // debug
+  Serial.print("FILT: ");
+  Serial.print(xCurrent); Serial.print(", ");
+  Serial.print(yCurrent); Serial.print(", ");
+  Serial.println(zCurrent);
+
+  // dead-zone
+  if (fabs(xCurrent) > xyThreshold || fabs(yCurrent) > xyThreshold) {
+
+    // scale filtered values into mouse steps
+    const float scale = 6.0f;        // tweak this to change speed
+    int xMove = (int)(xCurrent * scale);
+    int yMove = (int)(yCurrent * scale);
+
+    // clamp to HID range
+    xMove = constrain(xMove, -outRange, outRange);
+    yMove = constrain(yMove, -outRange, outRange);
+
+    // orbit vs pan: use Z as mode switch
+    if (fabs(zCurrent) < zThreshold && !isOrbit) {
+      Keyboard.press(KEY_LEFT_SHIFT);
+      isOrbit = true;
+    }
+
+    // middle mouse pan/orbit
+    Mouse.press(MOUSE_MIDDLE); 
+    // note: original code swapped x/y for Fusion ergonomics
+    Mouse.move(yMove, xMove, 0);
+  } else {
+    // centered: release controls
+    Mouse.release(MOUSE_MIDDLE);
+    Keyboard.releaseAll();
+    isOrbit = false;
+  }
+
+  delay(5);
+}
+
+// Go to home view in Fusion 360 (Win + Shift + H)
+void goHome()
+{
+  Keyboard.press(KEY_LEFT_GUI);
+  Keyboard.press(KEY_LEFT_SHIFT);
+  Keyboard.write('h');
+
+  delay(10);
+  Keyboard.releaseAll();
+  Serial.println("pressed home");
+}
+
+// Fit to view by double middle-click
+void fitToScreen()
+{
+  Mouse.press(MOUSE_MIDDLE);
+  Mouse.release(MOUSE_MIDDLE);
+  Mouse.press(MOUSE_MIDDLE);
+  Mouse.release(MOUSE_MIDDLE);
+
+  Serial.println("pressed fit");
+}
