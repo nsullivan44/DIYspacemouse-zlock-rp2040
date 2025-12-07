@@ -7,8 +7,5 @@ This project is based on the original DIY SpaceMouse code by SB-OCR https://gith
 Their foundational work on TLV493D-based 3D navigation made this enhanced version possible.  
 This fork expands the functionality with:
 - Z-axis pan lock
-- Hysteresis state machine
-- Adjustable sensitivity thresholds
 - Improved orbit/pan separation for Fusion 360
-- Hardware documentation and build diagrams
 - Updated TLV493D library calls 
